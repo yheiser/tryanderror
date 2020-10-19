@@ -1,0 +1,242 @@
+---
+title: "netcdf to map plotting"
+author: "Kira Rehfeld"
+date: "October 15, 2020"
+output: html_document
+---
+
+In this document I explore a couple of options for plotting spatial climate data using base R graphics. In particular using
+
+* image
+* image.plot from the fields package
+* levelplot from the raster package
+* and plotting spatialPointsDataFrames 
+* as well as spatialPolygonDataFrames, both from the raster package, which can be projected
+* and using vector data from the naturalearthdata.com shapefiles
+
+## Load libraries and set paths
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+library(ncdf4)
+library(raster)
+library(rasterVis)
+library(rgdal) #ogrListLayers
+library(RColorBrewer)
+library(viridisLite) # for magma color theme
+library(fields)
+fnam<-"~/R/spielwiese/Solarctica/RAW/air.mon.mean_1961_1990_fm.nc"
+
+# Projection strings
+robin_crs <- CRS("+proj=robin +lon_0=0w")
+unproj_crs <- CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0") # default proj for naturalearth shapefiles
+
+```
+
+## Prepare Natural Earth vector data
+More shapes, resolutions and additional raster data can be obtained by download from naturalearthdata.com.
+This data is in the public domain, hence there needs to be no explicit citation/acknowledgement. 
+!! On RC/DD this data is at /stacydata/resources/natural_earth_vector/
+
+
+```{r}
+# set up paths for physical and cultural vector data
+shape_path <- "~/mydata/Rdata/natural_earth_vector/50m_physical/"
+shape_path_cultural <- "~/mydata/Rdata/natural_earth_vector/50m_cultural/"
+
+# file names
+coast_shapefile <- paste(shape_path, "ne_50m_coastline.shp", sep="")
+ocean_shapefile <- paste(shape_path, "ne_50m_ocean.shp", sep="")
+admin0_shapefile <- paste(shape_path_cultural,"ne_50m_admin_0_countries.shp", sep="")
+admin1_shapefile <- paste(shape_path_cultural, "ne_50m_admin_1_states_provinces_lakes.shp", sep="")
+ogrListLayers(admin1_shapefile)
+# ogrListLayers gives an overview over the contents of the shapefile, but does not read it into memory
+
+lakes_shapefile <- paste(shape_path, "ne_50m_lakes.shp", sep="")
+bb_shapefile <- paste(shape_path, "ne_50m_graticules_all/ne_50m_wgs84_bounding_box.shp", sep="")
+grat30_shapefile <- paste(shape_path, "ne_50m_graticules_all/ne_50m_graticules_30.shp", sep="")
+ogrListLayers(grat30_shapefile)
+
+
+# set some default values for colors, line widths, etc
+names.shpz<-c("land","ocean","bb","lakes","grat30","countries","states")
+col.shpz<-c("black","aliceblue","black","aliceblue","gray50","gray50","gray50")
+lwd.shpz<-c(.1,.1,1,.1,.1,.1,.1)
+shapnames<-c(coast_shapefile,ocean_shapefile,bb_shapefile,lakes_shapefile,grat30_shapefile,admin0_shapefile,admin1_shapefile)
+
+shapz<-cbind(names.shpz,col.shpz,lwd.shpz,shapnames)
+
+shpz<-as.list(shapnames); names(shpz)<-names.shpz
+
+# read in the vector shapes into a list
+shpz.vecs<-lapply(shapnames,readOGR)
+
+# read in specifically the coastal shapefile
+coast_lines<-readOGR(coast_shapefile)
+summary(coast_lines)
+plot(coast_lines,col="magenta")
+# obtain the original projection string (if reprojection is desired)
+unproj_proj4string <- proj4string(coast_lines)
+
+# if necessary, transform these components by spTransform
+#coast_lines_proj <- spTransform(coast_lines, robin_crs)
+```
+
+## Get an overview over the vector objects from NaturalEarth and the default values
+```{r}
+
+layout(mat = matrix(seq(1,9),ncol=3,nrow=3))
+par(mar=c(0,0,4,0))
+plot(shpz.vecs[[1]],col=col.shpz[1],lwd=lwd.shpz[1],main=names(shpz)[1])
+for (i in 2:length(shpz.vecs)){
+  plot(shpz.vecs[[i]],col=col.shpz[i],lwd=lwd.shpz[i],main=names(shpz)[i])
+}
+```
+
+
+## Prepare data objects
+
+```{r Prepare data objects}
+ncf<-ncdf4::nc_open(fnam)
+d<-list()
+d$data<-ncdf4::ncvar_get(ncf,varid = "tas")
+d$lon<-ncdf4::ncvar_get(ncf,varid="lon")
+d$lat<-ncdf4::ncvar_get(ncf,varid="lat")
+
+# for image plot, reverse latitude
+d2<-d
+d2$lat<-rev(d$lat)
+d2$data<-d$data[,ncol(d$data):1]
+
+```
+
+## Simplest plots -- image and image plot!
+
+Simply add points by lat/lon values since there is no projection.
+```{r}
+image(d2$data)
+fields::image.plot(d2$lon,d2$lat,d2$data)
+maps::map("world2",add=TRUE,interior = FALSE)
+points(200,15,col="red",pch=1,cex=5) 
+
+```
+
+## Level plot from the raster package with marginal stats
+
+The raster package can read netcdf files directly, and atttempts to find the lat/lon values and the projection. The function *extract* can be used to find values along lines, in polygons, etc. The function *getValues* returns the data values of the raster object
+
+```{r levelplot}
+tree<-raster(fnam)
+projstr_orig<-projection(tree) 
+
+rasterVis::levelplot(tree,contour=TRUE, names.attr=c('R'))
+raster::contour(tree)
+hist(getValues(tree))
+
+#extract()
+```
+
+## Plot netcdf from raster as projected points (SpatialPointsDataFrame)
+
+```{r}
+tree_pts<-as(tree,"SpatialPointsDataFrame")
+summary(tree_pts)
+
+plotclr <- brewer.pal(9,"Greens")
+cutpts <- seq(min(d2$data,na.rm=TRUE),max(d2$data,na.rm=TRUE),length.out = 10)
+color_class <- findInterval(tree_pts[["Monthly.mean.of.surface.temperature"]], cutpts)+1
+plot(tree_pts$x, tree_pts$y, col=plotclr[color_class], pch=16, cex=0.25)
+plot(coast_lines, add=TRUE,wrap=TRUE) # from naturalearth.com
+# need to check why parts are missing/wrap is incorrect
+```
+## Plot netcdf from raster as projected points (SpatialPointsDataFrame)
+```{r}
+tree_pts_proj <- spTransform(tree_pts, robin_crs)
+coast_lines_proj <- spTransform(coast_lines, robin_crs)
+bb_lines_proj <- spTransform(shpz.vecs[[3]], robin_crs)
+summary(tree_pts_proj)
+
+
+#plotclr <- brewer.pal(9,"Greens")
+plotclr<-viridisLite::magma(n = 9)
+#cutpts <- c(10,20,30,40,50,60,70,80,90)
+#color_class <- findInterval(tree_pts_proj$treecov, cutpts)+1
+cutpts <- seq(min(getValues(tree),na.rm=TRUE),max(getValues(tree),na.rm=TRUE),length.out = 10)
+color_class <- findInterval(tree_pts[["Monthly.mean.of.surface.temperature"]], cutpts)+1
+par(mar=c(4,2,2,2))
+plot(bb_lines_proj, col="deepskyblue", bor="black",axes=FALSE,xlab="",ylab="")
+points(tree_pts_proj$x, tree_pts_proj$y, col=plotclr[color_class], pch=16, cex=0.25)
+plot(coast_lines_proj, add=TRUE)
+#  legend(-17000000, -5000000, legend=c("< 10","10 - 100","100 - 1000","> 1000"), bg="white",
+ #   title="Number of Samples", pch=2, pt.lwd=0.6, col=plot, cex=0.5)
+
+# Project and add a single point
+crds <- matrix(data=c(8, 49.52), ncol=2)
+spPointHD <- spTransform(SpatialPoints(coords=crds,
+ proj4string=unproj_crs),robin_crs) 
+points(spPointHD,col="red",lwd=3)
+
+
+# add legend strip
+image.plot(getValues(tree),col = plotclr,breaks=cutpts,add = TRUE,legend.only = TRUE,horizontal = TRUE,legend.lab="K",legend.line=1.25,legend.width=1,legend.shrink=0.6,midpoint=TRUE,axis.args=list(at=cutpts,labels=round(cutpts),mgp=c(3,0.5,0))  )
+# reduced spacing by mgp, which can also be set globally with par(). check current values by par()$mgp
+#par(mgp=c(axis.title.position, axis.label.position, axis.line.position))]
+
+```
+
+## Set up polygon plot for netcdf file (SpatialPolygonsDataFrame)
+```{r}
+tree<-raster(fnam)
+projstr_orig<-projection(tree) 
+tree_poly <- as(tree, "SpatialPolygonsDataFrame")
+summary(tree_poly)
+tree_poly_proj <- spTransform(tree_poly, robin_crs)
+
+```
+
+
+```{r}
+
+# set up plot colors
+plotclr <- brewer.pal(9,"Greens")
+#cutpts <- c(10,20,30,40,50,60,70,80,90)
+#color_class <- findInterval(tree_pts_proj$treecov, cutpts)+1
+cutpts <- seq(min(getValues(tree),na.rm=TRUE),max(getValues(tree),na.rm=TRUE),length.out = 10)
+color_class <- findInterval(tree_pts[["Monthly.mean.of.surface.temperature"]], cutpts)+1
+clr<-plotclr[color_class] # color vector for polygons
+
+# set up axis labels for latitude
+data.ax=as.matrix(cbind(rep(-180,5),seq(-60,60,by=30)),ncol=2)
+SP.in<-SpatialPoints(coords = data.ax,proj4string = unproj_crs)
+SP<-spTransform(SP.in,robin_crs)
+SPlab<-c(expression("60"^degree*S),expression("30"^degree*S),"Eq.",expression("30"^degree*N),expression("60"^degree*N))
+
+# longitude
+data.axx=as.matrix(cbind(seq(-180,180,by=60),rep(-90,7)),ncol=2)
+SP.in.x<-SpatialPoints(coords = data.axx,proj4string = unproj_crs)
+SP.x<-spTransform(SP.in.x,robin_crs)
+#SPlab<-c(expression("60"^degree*S),expression("30"^degree*S),"Eq.",expression("30"^degree*N),expression("60"^degree*N))
+#SPlab.x<-paste0(rep("expression(",7),seq(-180,180,by=60),rep("^degree*",7),c("E","E","E"," ","W","W","W"),rep(")",7))
+#SPlab.x<-paste0(seq(-180,180,by=60),rep("^degree*",7),c("E","E","E"," ","W","W","W"))
+SPlab.x<-paste0(seq(-180,180,by=60),rep("°",7),c("E","E","E"," ","W","W","W"))
+# project naturalearth shapefiles
+shpz.proj<-lapply(shpz.vecs,spTransform,robin_crs)
+
+# begin plot
+plot(shpz.proj[[3]],col="aliceblue",bor="black")#bb
+plot(shpz.proj[[5]],col=col.shpz[5],bor=col.shpz[5],add=TRUE)#graticules
+#plot(tree_poly_proj,col=clr,bor=clr,ljoin="bevel",add=TRUE)
+points(tree_pts_proj$x, tree_pts_proj$y, col=plotclr[color_class], pch=16, cex=0.25) # points are much faster to plot!
+plot(shpz.proj[[1]],col="black",bor="black",add=TRUE)#land
+#plot(coast_lines_proj, col="black",add=TRUE)
+
+
+text(coordinates(SP),labels=SPlab,adj=c(1.25,0.5),cex = 0.75)
+text(coordinates(SP.x),labels=eval(SPlab.x),adj=c(0.5,1.15),cex = 0.75)
+
+# add legend strip
+image.plot(getValues(tree),col = plotclr,breaks=cutpts,add = TRUE,legend.only = TRUE,horizontal = TRUE,legend.lab="K",legend.line=1.25,legend.width=0.75,legend.shrink=0.5,midpoint=TRUE,axis.args=list(cex.axis=0.75,at=cutpts,labels=round(cutpts),mgp=c(3,0.5,0))  )
+
+```
+
